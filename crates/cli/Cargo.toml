@@ -1,0 +1,9 @@
+[package]
+name = "utau-tts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+utau-tts-core = { path = "../core" }
+anyhow.workspace = true
+clap.workspace = true
