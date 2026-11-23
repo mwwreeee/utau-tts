@@ -79,7 +79,7 @@ _d{_d{_d-.wav={ d-,919.005,447.999,-492.0,250.0,83.333
         let inv = Inventory::learn(&bank());
         assert!(inv.is_v("@") && inv.is_v("{"));
         assert!(inv.is_c("h") && inv.is_c("b") && inv.is_c("d"));
-        assert!(!inv.is_v("U")); // never appears as "- U" + "U -" in this sample
+        assert!(!inv.is_v("U"));
     }
 
     #[test]
