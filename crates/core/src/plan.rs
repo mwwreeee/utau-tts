@@ -97,11 +97,30 @@ pub enum Role {
     Final,
 }
 
+/// Per-unit light tuning. Neutral = scale 1.0, 0 st, 0 dB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnitEdit {
+    /// Multiplier on how long the unit's note lasts (shortening always works;
+    /// lengthening is capped by the recording).
+    pub dur_scale: f64,
+    /// Pitch offset in semitones (varispeed).
+    pub pitch_st: f64,
+    pub gain_db: f64,
+}
+
+impl Default for UnitEdit {
+    fn default() -> Self {
+        Self { dur_scale: 1.0, pitch_st: 0.0, gain_db: 0.0 }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Plan {
     pub aliases: Vec<String>,
     /// One per alias.
     pub roles: Vec<Role>,
+    /// One per alias; tuning travels with the plan.
+    pub edits: Vec<UnitEdit>,
     /// Phones no template could cover (missing from the bank, or inside a cluster).
     pub skipped: Vec<String>,
     /// Template names used, for debugging.
@@ -221,6 +240,13 @@ fn role_of(pattern: &str, phones: &[Phone], i: i32) -> Role {
     }
 }
 
+impl Plan {
+    /// Neutral tuning for every unit.
+    pub fn reset_edits(&mut self) {
+        self.edits = vec![UnitEdit::default(); self.aliases.len()];
+    }
+}
+
 /// Positions are 1-based over the phones; 0 and n+1 are implicit silence.
 pub fn plan(phones: &[Phone], bank: &Bank) -> Plan {
     plan_with(phones, bank, TEMPLATES)
@@ -287,5 +313,6 @@ fn plan_with(phones: &[Phone], bank: &Bank, templates: &[Template]) -> Plan {
             plan.skipped.push(s);
         }
     }
+    plan.reset_edits();
     plan
 }

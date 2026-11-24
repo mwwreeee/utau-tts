@@ -6,6 +6,7 @@ pub mod plan;
 pub mod render;
 pub mod report;
 pub mod text;
+pub mod tuning;
 
 use anyhow::Result;
 
@@ -14,6 +15,7 @@ use inventory::Inventory;
 use plan::Plan;
 use text::Item;
 
+#[derive(Clone)]
 pub enum Planned {
     Units(Plan),
     Pause(f64),

@@ -71,6 +71,9 @@ enum Cmd {
         /// Pacing: 1.0 default, 1.3 faster, 0.8 slower.
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
+        /// Global pitch offset in semitones (varispeed; keep within about +/-3).
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        pitch: f64,
         /// Bank family; auto-detected by default.
         #[arg(long, value_enum, default_value_t = FamilyArg::Auto)]
         family: FamilyArg,
@@ -90,8 +93,8 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Inspect { bank, aliases } => inspect(bank, aliases),
         Cmd::Find { bank, pattern, limit } => find(bank, pattern, limit),
-        Cmd::Say { bank, text, phones, dict, output, rate, speed, family, plan_only } => {
-            say(bank, text, phones, dict, output, rate, speed, family, plan_only)
+        Cmd::Say { bank, text, phones, dict, output, rate, speed, pitch, family, plan_only } => {
+            say(bank, text, phones, dict, output, rate, speed, pitch, family, plan_only)
         }
     }
 }
@@ -215,6 +218,7 @@ fn say(
     output: PathBuf,
     rate: u32,
     speed: f64,
+    pitch: f64,
     family_arg: FamilyArg,
     plan_only: bool,
 ) -> Result<()> {
@@ -279,7 +283,7 @@ fn say(
         return Ok(());
     }
 
-    let samples = render_planned(&bank, &planned, &RenderOptions { rate, speed })?;
+    let samples = render_planned(&bank, &planned, &RenderOptions { rate, speed, pitch_st: pitch })?;
     write_wav(&output, &samples, rate)?;
     println!("wrote {} ({:.2}s)", output.display(), samples.len() as f32 / rate as f32);
     Ok(())

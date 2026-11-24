@@ -1,13 +1,17 @@
-//! Rendering: slice units out of the bank's wavs, place them on a timeline
-//! using preutterance, and crossfade neighbours over `overlap`.
+//! Rendering: slice units out of the bank's wavs, apply light per-unit tuning,
+//! place them on a timeline using preutterance, and crossfade neighbours over
+//! `overlap`.
 //!
-//! No pitch or duration modification yet: vowel lengths are capped by what the
-//! recordings contain.
+//! Tuning is deliberately simple: pitch is varispeed resampling (also shifts
+//! formants and unit length, so keep it within a few semitones), duration only
+//! shortens or lengthens within what the recordings contain, gain is a plain
+//! multiplier. Real pitch/time modification (WORLD/PSOLA) comes later.
 
 use std::{
     collections::HashMap,
     f32::consts::FRAC_PI_2,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
@@ -59,12 +63,12 @@ pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<()> {
     Ok(())
 }
 
-/// Linear interpolation. Good enough to get started; swap for `rubato` later.
-fn resample(data: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || data.is_empty() {
+/// Linear interpolation reading `data` at `ratio` samples per output sample.
+/// ratio > 1 plays faster (higher, shorter); < 1 slower (lower, longer).
+fn resample_by_ratio(data: &[f32], ratio: f64) -> Vec<f32> {
+    if data.is_empty() || (ratio - 1.0).abs() < 1e-9 || ratio <= 0.0 {
         return data.to_vec();
     }
-    let ratio = from as f64 / to as f64;
     let n = (data.len() as f64 / ratio) as usize;
     (0..n)
         .map(|i| {
@@ -76,6 +80,10 @@ fn resample(data: &[f32], from: u32, to: u32) -> Vec<f32> {
             a + (b - a) * f
         })
         .collect()
+}
+
+fn resample(data: &[f32], from: u32, to: u32) -> Vec<f32> {
+    resample_by_ratio(data, from as f64 / to as f64)
 }
 
 /// UTAU cutoff convention (verified against real oto.ini data):
@@ -99,12 +107,21 @@ pub struct RenderOptions {
     pub rate: u32,
     /// 1.0 = default pacing, 2.0 = twice as fast.
     pub speed: f64,
+    /// Global pitch offset in semitones (varispeed; keep small).
+    pub pitch_st: f64,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { rate: 44100, speed: 1.0 }
+        Self { rate: 44100, speed: 1.0, pitch_st: 0.0 }
     }
+}
+
+/// Decoded, resampled wavs shared between renders (GUI re-renders often).
+pub type SharedCache = Arc<Mutex<HashMap<(PathBuf, u32), Arc<Vec<f32>>>>>;
+
+pub fn new_cache() -> SharedCache {
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
 const MIN_STEP_MS: f64 = 25.0;
@@ -127,6 +144,8 @@ pub struct UnitMeta {
     pub preutter: f64,
     pub overlap: f64,
     pub role: Role,
+    /// Per-unit multiplier on the note length (1.0 = default).
+    pub dur_scale: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,7 +175,8 @@ pub fn timeline(units: &[UnitMeta], speed: f64) -> Vec<Slot> {
             continue;
         }
         let prev = slots[u - 1];
-        let desired = desired_ms(units[u - 1].role, speed);
+        let prev_unit = units[u - 1];
+        let desired = desired_ms(prev_unit.role, speed) * prev_unit.dur_scale.max(0.05);
         // Don't ask the previous unit for more audio than it has.
         let d = desired.min(prev.rem + p - ov_raw).max(MIN_STEP_MS);
         let p_eff = p.min(d);
@@ -174,28 +194,34 @@ pub fn timeline(units: &[UnitMeta], speed: f64) -> Vec<Slot> {
 pub struct Renderer<'a> {
     bank: &'a Bank,
     opts: RenderOptions,
-    cache: HashMap<PathBuf, Vec<f32>>,
+    cache: SharedCache,
 }
 
 impl<'a> Renderer<'a> {
     pub fn new(bank: &'a Bank, opts: RenderOptions) -> Self {
-        Self { bank, opts, cache: HashMap::new() }
+        Self::with_cache(bank, opts, new_cache())
+    }
+
+    pub fn with_cache(bank: &'a Bank, opts: RenderOptions, cache: SharedCache) -> Self {
+        Self { bank, opts, cache }
     }
 
     fn ms(&self, x: f64) -> usize {
         (x.max(0.0) * self.opts.rate as f64 / 1000.0).round() as usize
     }
 
-    fn audio(&mut self, path: &Path) -> Result<&Vec<f32>> {
-        if !self.cache.contains_key(path) {
-            let w = read_wav(path).with_context(|| format!("reading {}", path.display()))?;
-            self.cache
-                .insert(path.to_path_buf(), resample(&w.data, w.rate, self.opts.rate));
+    fn audio(&self, path: &Path) -> Result<Arc<Vec<f32>>> {
+        let key = (path.to_path_buf(), self.opts.rate);
+        if let Some(a) = self.cache.lock().unwrap().get(&key) {
+            return Ok(a.clone());
         }
-        Ok(&self.cache[path])
+        let w = read_wav(path).with_context(|| format!("reading {}", path.display()))?;
+        let data = Arc::new(resample(&w.data, w.rate, self.opts.rate));
+        self.cache.lock().unwrap().insert(key, data.clone());
+        Ok(data)
     }
 
-    fn segment(&mut self, e: &OtoEntry) -> Result<Vec<f32>> {
+    fn segment(&self, e: &OtoEntry) -> Result<Vec<f32>> {
         let rate = self.opts.rate as f64;
         let to_samples = |ms: f64| (ms * rate / 1000.0).round() as isize;
         let data = self.audio(&e.wav)?;
@@ -203,7 +229,7 @@ impl<'a> Renderer<'a> {
         Ok(data[s..en].to_vec())
     }
 
-    fn render_phrase(&mut self, plan: &Plan) -> Result<Vec<f32>> {
+    fn render_phrase(&self, plan: &Plan) -> Result<Vec<f32>> {
         let n = plan.aliases.len();
         if n == 0 {
             return Ok(Vec::new());
@@ -218,12 +244,28 @@ impl<'a> Renderer<'a> {
                 .entries
                 .get(alias)
                 .with_context(|| format!("alias '{alias}' vanished from bank"))?;
-            let seg = self.segment(e)?;
+            let mut seg = self.segment(e)?;
+
+            let edit = plan.edits.get(k).copied().unwrap_or_default();
+            let st = self.opts.pitch_st + edit.pitch_st;
+            let ratio = 2f64.powf(st / 12.0);
+            if (ratio - 1.0).abs() > 1e-6 {
+                seg = resample_by_ratio(&seg, ratio);
+            }
+            if edit.gain_db.abs() > 1e-6 {
+                let g = 10f32.powf(edit.gain_db as f32 / 20.0);
+                for s in &mut seg {
+                    *s *= g;
+                }
+            }
             metas.push(UnitMeta {
                 len_ms: seg.len() as f64 * 1000.0 / rate,
-                preutter: e.preutter,
-                overlap: e.overlap,
+                // timing fields live on the sample's own time axis, which
+                // varispeed scaled
+                preutter: e.preutter / ratio,
+                overlap: e.overlap / ratio,
                 role: plan.roles.get(k).copied().unwrap_or(Role::Cons),
+                dur_scale: edit.dur_scale,
             });
             segs.push(seg);
         }
@@ -273,7 +315,7 @@ impl<'a> Renderer<'a> {
         Ok(out)
     }
 
-    pub fn render(&mut self, planned: &[Planned]) -> Result<Vec<f32>> {
+    pub fn render(&self, planned: &[Planned]) -> Result<Vec<f32>> {
         let mut out: Vec<f32> = Vec::new();
         for p in planned {
             match p {
@@ -301,6 +343,10 @@ impl<'a> Renderer<'a> {
 mod tests {
     use super::*;
 
+    fn meta(len: f64, p: f64, ov: f64, role: Role) -> UnitMeta {
+        UnitMeta { len_ms: len, preutter: p, overlap: ov, role, dur_scale: 1.0 }
+    }
+
     #[test]
     fn cutoff_conventions() {
         assert_eq!(bounds(1000, 100, -300), (100, 400)); // length from offset
@@ -312,8 +358,8 @@ mod tests {
     #[test]
     fn vc_head_is_trimmed_when_vowel_is_short() {
         // numbers from the Teto bank: "h@" and "@ l"-style VC
-        let cv = UnitMeta { len_ms: 443.0, preutter: 110.0, overlap: 47.0, role: Role::Vowel(0) };
-        let vc = UnitMeta { len_ms: 583.0, preutter: 250.0, overlap: 83.0, role: Role::Cons };
+        let cv = meta(443.0, 110.0, 47.0, Role::Vowel(0));
+        let vc = meta(583.0, 250.0, 83.0, Role::Cons);
         let s = timeline(&[cv, vc], 1.0);
         assert!((s[0].start - 0.0).abs() < 1e-9);
         assert!((s[0].t - 110.0).abs() < 1e-9);
@@ -326,10 +372,29 @@ mod tests {
 
     #[test]
     fn long_vowel_needs_no_trim() {
-        let cv = UnitMeta { len_ms: 600.0, preutter: 110.0, overlap: 47.0, role: Role::Vowel(1) };
-        let vc = UnitMeta { len_ms: 583.0, preutter: 150.0, overlap: 83.0, role: Role::Cons };
+        let cv = meta(600.0, 110.0, 47.0, Role::Vowel(1));
+        let vc = meta(583.0, 150.0, 83.0, Role::Cons);
         let s = timeline(&[cv, vc], 1.0);
         assert!((s[1].trim - 0.0).abs() < 1e-9);
         assert!((s[1].start - (s[0].t + 190.0 - 150.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn duration_scale_changes_note_length() {
+        let mut cv = meta(600.0, 110.0, 47.0, Role::Vowel(1));
+        let vc = meta(583.0, 150.0, 83.0, Role::Cons);
+        let base = timeline(&[cv, vc], 1.0)[1].t;
+        cv.dur_scale = 0.5;
+        let short = timeline(&[cv, vc], 1.0)[1].t;
+        assert!((base - 110.0 - 190.0).abs() < 1e-9);
+        assert!((short - 110.0 - 95.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn varispeed_changes_length_by_ratio() {
+        let x = vec![0.0f32; 1000];
+        assert_eq!(resample_by_ratio(&x, 2.0).len(), 500);
+        assert_eq!(resample_by_ratio(&x, 0.5).len(), 2000);
+        assert_eq!(resample_by_ratio(&x, 1.0).len(), 1000);
     }
 }
