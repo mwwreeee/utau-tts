@@ -1,3 +1,9 @@
+//! Learn a bank's phoneme inventory from its aliases alone.
+//!
+//! Vowels: anything that appears as both "- X" (start) and "X -" (end).
+//! Consonants: the leftover part of CV tokens ("bU" minus vowel "U" = "b") and
+//! the consonant side of VC tokens ("U b", "U b-").
+
 use std::collections::BTreeSet;
 
 use crate::bank::Bank;
@@ -22,7 +28,7 @@ impl Inventory {
         let mut consonants = BTreeSet::new();
         for a in &aliases {
             for tok in a.split(' ') {
-                let tok = tok.trim_end_matches('-');
+                let tok = tok.trim_end_matches('-'); // "d-" -> "d", "-" -> ""
                 if tok.is_empty() || vowels.contains(tok) {
                     continue;
                 }
@@ -39,6 +45,22 @@ impl Inventory {
         Inventory { vowels, consonants }
     }
 
+    /// (single consonants, clusters, other). "Other" is usually leftovers from
+    /// units we can't interpret (e.g. Japanese-style "ba", "ro" in an English bank).
+    pub fn consonant_groups(&self) -> (Vec<&str>, Vec<&str>, Vec<&str>) {
+        let (mut singles, mut clusters, mut other) = (vec![], vec![], vec![]);
+        for c in &self.consonants {
+            if crate::phones::SINGLE_CONSONANTS.contains(&c.as_str()) {
+                singles.push(c.as_str());
+            } else if crate::phones::decomposes(c) {
+                clusters.push(c.as_str());
+            } else {
+                other.push(c.as_str());
+            }
+        }
+        (singles, clusters, other)
+    }
+
     pub fn is_v(&self, s: &str) -> bool {
         self.vowels.contains(s)
     }
@@ -47,6 +69,7 @@ impl Inventory {
         self.consonants.contains(s)
     }
 
+    /// Split "bU" into ("b", "U") using the longest matching vowel suffix.
     pub fn split_cv<'a>(&self, tok: &'a str) -> Option<(&'a str, String)> {
         split_cv(tok, &self.vowels).filter(|(c, _)| self.consonants.contains(*c))
     }

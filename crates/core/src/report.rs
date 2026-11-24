@@ -1,3 +1,6 @@
+//! Import-time diagnostics: what kinds of units the bank has, what it lacks,
+//! and which aliases we couldn't explain (paste these when a new bank misbehaves).
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{bank::Bank, inventory::Inventory, phones};
@@ -38,6 +41,10 @@ pub fn classify(alias: &str, inv: &Inventory) -> Option<&'static str> {
                 None
             }
         }
+        [a, b] if inv.is_c(a) && b.ends_with('-') && inv.is_c(b.trim_end_matches('-')) => {
+            Some("cc_end")
+        }
+        [a, b] if inv.is_c(a) && inv.is_c(b) => Some("cc"),
         [x] => {
             if inv.is_v(x) {
                 Some("bare_v")

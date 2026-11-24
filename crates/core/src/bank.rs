@@ -1,3 +1,5 @@
+//! Voicebank loading: oto.ini parsing, encoding detection, directory walking.
+
 use std::{
     collections::HashMap,
     fs,
@@ -8,12 +10,15 @@ use anyhow::{bail, Result};
 use encoding_rs::SHIFT_JIS;
 use walkdir::WalkDir;
 
+/// One line of an oto.ini. All times are in milliseconds.
 #[derive(Debug, Clone)]
 pub struct OtoEntry {
     pub alias: String,
     pub wav: PathBuf,
     pub offset: f64,
+    /// Region (from offset) that must not be time-stretched.
     pub consonant: f64,
+    /// Positive: length measured from offset. Negative: trimmed from end of file.
     pub cutoff: f64,
     pub preutter: f64,
     pub overlap: f64,
@@ -23,11 +28,14 @@ pub struct OtoEntry {
 pub struct Bank {
     pub name: String,
     pub root: PathBuf,
+    /// Keyed by the alias exactly as written. Case matters ("u" != "U", "d" != "D").
     pub entries: HashMap<String, OtoEntry>,
+    /// Aliases that appeared more than once (first one wins for now).
     pub duplicates: usize,
     pub bad_lines: usize,
 }
 
+/// UTF-8 first (English banks usually are), Shift-JIS as the fallback.
 pub fn decode_text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
@@ -84,6 +92,8 @@ impl Bank {
         Ok(bank)
     }
 
+    /// Parse the text of one oto.ini. `dir` is the folder it lives in; wav paths
+    /// are resolved relative to it.
     pub fn add_oto_text(&mut self, text: &str, dir: &Path) {
         for line in text.lines() {
             let Some((wav, rest)) = line.split_once('=') else {
@@ -94,6 +104,7 @@ impl Bank {
                 self.bad_lines += 1;
                 continue;
             }
+            // An empty alias means "use the file name without extension".
             let alias = if f[0].is_empty() {
                 Path::new(wav)
                     .file_stem()
