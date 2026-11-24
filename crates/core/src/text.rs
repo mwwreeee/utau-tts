@@ -1,5 +1,3 @@
-//! Text frontend: words -> ARPAbet via CMUdict, with pauses at punctuation.
-
 use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::Result;
@@ -7,10 +5,8 @@ use anyhow::Result;
 pub struct Dict(HashMap<String, Vec<String>>);
 
 impl Dict {
-    /// Loads a CMUdict-format file (cmudict.dict or cmudict-0.7b).
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        // PowerShell's `>` writes UTF-16, and browsers can save BOMs.
         let decoded: String = if bytes.starts_with(&[0xFF, 0xFE]) {
             encoding_rs::UTF_16LE.decode(&bytes).0.into_owned()
         } else if bytes.starts_with(&[0xFE, 0xFF]) {
@@ -31,7 +27,7 @@ impl Dict {
             if phones.is_empty() {
                 continue;
             }
-            map.entry(word).or_insert(phones); // first pronunciation wins
+            map.entry(word).or_insert(phones);
         }
         Ok(Dict(map))
     }
@@ -51,16 +47,13 @@ impl Dict {
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    /// ARPAbet tokens for a stretch of words with no pause between them.
     Phrase(Vec<String>),
-    /// Silence in milliseconds.
     Pause(f64),
 }
 
 #[derive(Debug, Default)]
 pub struct Frontend {
     pub items: Vec<Item>,
-    /// Words not in the dictionary (dropped for now; G2P fallback is a TODO).
     pub oov: Vec<String>,
 }
 
